@@ -2,15 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any
-
-try:
-    import polars as pl
-except ImportError as exc:
-    raise ImportError(
-        "polars is required for PolarsEngine. Install it with: pip install dqflow[polars]"
-    ) from exc
+import polars as pl
 
 from dqflow.column import Column
 from dqflow.contract import Contract
@@ -19,42 +11,49 @@ from dqflow.result import CheckResult, ValidationResult
 
 
 class PolarsEngine(Engine):
-    """Validation engine for Polars DataFrames with native parallelism and lazy evaluation."""
+    """Validation engine for Polars DataFrames."""
 
     def validate(
         self,
-        df: pl.DataFrame | pl.LazyFrame,
+        data: pl.DataFrame | pl.LazyFrame,
         contract: Contract,
+        **kwargs,
     ) -> ValidationResult:
-        if isinstance(df, pl.LazyFrame):
-            df = df.collect()
+
+        if isinstance(data, pl.LazyFrame):
+            data = data.collect()
+
+        df = data  # normalize
 
         result = ValidationResult(contract_name=contract.name)
         cache = self._build_stats_cache(df)
 
+        # 1. COLUMN EXISTENCE CHECKS
         for col_name in contract.columns:
-            if col_name not in df.columns:
-                result.checks.append(
-                    CheckResult(
-                        name=f"column_exists:{col_name}",
-                        passed=False,
-                        message=f"Column '{col_name}' not found in DataFrame",
-                    )
-                )
-            else:
-                result.checks.append(
-                    CheckResult(name=f"column_exists:{col_name}", passed=True, message="")
-                )
+            exists = col_name in df.columns
 
+            result.checks.append(
+                CheckResult(
+                    name=f"column_exists:{col_name}",
+                    passed=exists,
+                    message=("" if exists else f"Column '{col_name}' not found in DataFrame"),
+                )
+            )
+
+        # 2. COLUMN VALIDATION CHECKS
         for col_name, col_def in contract.columns.items():
             if col_name not in df.columns:
                 continue
+
             result.checks.extend(self._validate_column(df[col_name], col_name, col_def))
 
+        # 3. RULES
         for rule in contract.rules:
             result.checks.append(self._evaluate_rule(df, rule, cache))
 
         return result
+
+    # COLUMN VALIDATION
 
     def _validate_column(
         self,
@@ -62,8 +61,10 @@ class PolarsEngine(Engine):
         col_name: str,
         col_def: Column,
     ) -> list[CheckResult]:
+
         checks: list[CheckResult] = []
 
+        # NOT NULL
         if col_def.not_null:
             null_count = series.null_count()
             checks.append(
@@ -75,9 +76,11 @@ class PolarsEngine(Engine):
                 )
             )
 
+        # MIN
         if col_def.min is not None:
             min_val = series.min()
             passed = min_val is None or min_val >= col_def.min
+
             checks.append(
                 CheckResult(
                     name=f"min:{col_name}",
@@ -89,9 +92,11 @@ class PolarsEngine(Engine):
                 )
             )
 
+        # MAX
         if col_def.max is not None:
             max_val = series.max()
             passed = max_val is None or max_val <= col_def.max
+
             checks.append(
                 CheckResult(
                     name=f"max:{col_name}",
@@ -103,10 +108,10 @@ class PolarsEngine(Engine):
                 )
             )
 
+        # ALLOWED VALUES
         if col_def.allowed is not None:
-            allowed_set = set(col_def.allowed)
-            unique_vals = set(series.drop_nulls().unique().to_list())
-            invalid = unique_vals - allowed_set
+            invalid = set(series.drop_nulls().unique().to_list()) - set(col_def.allowed)
+
             checks.append(
                 CheckResult(
                     name=f"allowed:{col_name}",
@@ -116,11 +121,10 @@ class PolarsEngine(Engine):
                 )
             )
 
-        if col_def.freshness_minutes is not None:
-            checks.append(self._check_freshness(series, col_name, col_def.freshness_minutes))
-
+        # UNIQUE
         if col_def.unique:
             duplicate_count = int(series.is_duplicated().sum())
+
             checks.append(
                 CheckResult(
                     name=f"unique:{col_name}",
@@ -132,112 +136,21 @@ class PolarsEngine(Engine):
                 )
             )
 
-        if col_def.pattern is not None:
-            non_null = series.drop_nulls().cast(pl.String)
-            # Anchor at start to match pandas str.match (re.match) semantics
-            anchored = (
-                col_def.pattern if col_def.pattern.startswith("^") else f"^(?:{col_def.pattern})"
-            )
-            invalid_count = int((~non_null.str.contains(anchored)).sum())
-            checks.append(
-                CheckResult(
-                    name=f"pattern:{col_name}",
-                    passed=invalid_count == 0,
-                    message=(
-                        f"{invalid_count} values do not match pattern '{col_def.pattern}'"
-                        if invalid_count > 0
-                        else ""
-                    ),
-                    details={"invalid_count": invalid_count, "pattern": col_def.pattern},
-                )
-            )
-
-        if col_def.custom is not None:
-            try:
-                results = series.map_elements(col_def.custom, return_dtype=pl.Boolean)
-                passed_count = int(results.sum())
-                total_count = len(series)
-                checks.append(
-                    CheckResult(
-                        name=f"custom:{col_name}",
-                        passed=passed_count == total_count,
-                        message=(
-                            f"{total_count - passed_count} values failed custom check"
-                            if passed_count != total_count
-                            else ""
-                        ),
-                        details={"passed": passed_count, "total": total_count},
-                    )
-                )
-            except Exception as exc:
-                checks.append(
-                    CheckResult(
-                        name=f"custom:{col_name}",
-                        passed=False,
-                        message=f"Custom check raised exception: {exc}",
-                    )
-                )
-
         return checks
 
-    def _check_freshness(
-        self,
-        series: pl.Series,
-        col_name: str,
-        freshness_minutes: int,
-    ) -> CheckResult:
-        try:
-            if "Date" not in str(series.dtype) and "Datetime" not in str(series.dtype):
-                series = series.cast(pl.String).str.to_datetime()
+    # STATS CACHE
 
-            max_ts = series.max()
-
-            if max_ts is None:
-                return CheckResult(
-                    name=f"freshness:{col_name}",
-                    passed=False,
-                    message="No valid timestamps found",
-                )
-
-            now = datetime.now(timezone.utc)
-
-            if isinstance(max_ts, datetime) and max_ts.tzinfo is None:
-                max_ts = max_ts.replace(tzinfo=timezone.utc)
-
-            age = now - max_ts
-            threshold = timedelta(minutes=freshness_minutes)
-            passed = age <= threshold
-
-            return CheckResult(
-                name=f"freshness:{col_name}",
-                passed=passed,
-                message=f"Data is {age} old, threshold is {threshold}" if not passed else "",
-                details={
-                    "max_timestamp": max_ts.isoformat(),
-                    "age_minutes": age.total_seconds() / 60,
-                },
-            )
-
-        except Exception as exc:
-            return CheckResult(
-                name=f"freshness:{col_name}",
-                passed=False,
-                message=f"Failed to check freshness: {exc}",
-            )
-
-    def _build_stats_cache(
-        self,
-        df: pl.DataFrame,
-    ) -> dict[str, dict[str, float | int]]:
-        row_count = len(df)
+    def _build_stats_cache(self, df: pl.DataFrame) -> dict[str, dict[str, float | int]]:
         return {
             col: {
-                "null_rate": df[col].null_count() / row_count if row_count > 0 else 0.0,
+                "null_rate": df[col].null_count() / len(df) if len(df) > 0 else 0.0,
                 "unique_count": df[col].n_unique(),
-                "row_count": row_count,
+                "row_count": len(df),
             }
             for col in df.columns
         }
+
+    # RULE ENGINE
 
     def _evaluate_rule(
         self,
@@ -245,35 +158,25 @@ class PolarsEngine(Engine):
         rule: str,
         cache: dict[str, dict[str, float | int]],
     ) -> CheckResult:
+
         try:
-            result = self._parse_and_evaluate(df, rule, cache)
+            context = {
+                "row_count": len(df),
+                "null_rate": lambda c: cache.get(c, {}).get("null_rate", 0),
+                "unique_count": lambda c: cache.get(c, {}).get("unique_count", 0),
+            }
+
+            result = eval(rule, {"__builtins__": {}}, context)
+
             return CheckResult(
                 name=f"rule:{rule}",
                 passed=bool(result),
                 message="" if result else f"Rule '{rule}' failed",
             )
-        except Exception as exc:
+
+        except Exception as e:
             return CheckResult(
                 name=f"rule:{rule}",
                 passed=False,
-                message=f"Failed to evaluate rule: {exc}",
+                message=f"Failed to evaluate rule: {e}",
             )
-
-    def _parse_and_evaluate(
-        self,
-        df: pl.DataFrame,
-        rule: str,
-        cache: dict[str, dict[str, float | int]],
-    ) -> Any:
-        context = {
-            "row_count": len(df),
-            "null_rate": lambda col: cache.get(col, {}).get("null_rate", 0),
-            "unique_count": lambda col: cache.get(col, {}).get("unique_count", 0),
-            "duplicate_rate": lambda col: (
-                (cache.get(col, {}).get("row_count", 0) - cache.get(col, {}).get("unique_count", 0))
-                / cache.get(col, {}).get("row_count", 1)
-                if cache.get(col)
-                else 0
-            ),
-        }
-        return eval(rule, {"__builtins__": {}}, context)

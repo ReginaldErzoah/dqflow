@@ -58,13 +58,15 @@ def create_contract(
         column_definitions[f"column_{index}"] = Column(
             dtype=int,
             not_null=True,
+            min=0,
+            max=100_000,
+            unique=True,
         )
 
     return Contract(
         name="benchmark",
         columns=column_definitions,
     )
-
 
 def benchmark_engine(
     engine: Any,

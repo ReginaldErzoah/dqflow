@@ -68,6 +68,7 @@ def create_contract(
         columns=column_definitions,
     )
 
+
 def benchmark_engine(
     engine: Any,
     data: Any,

@@ -33,10 +33,7 @@ def test_not_null_validation_regression() -> None:
         contract,
     )
 
-    check = next(
-        c for c in result.checks
-        if c.name == "not_null:customer_id"
-    )
+    check = next(c for c in result.checks if c.name == "not_null:customer_id")
 
     assert check.passed is False
     assert check.details["null_count"] == 1
@@ -67,10 +64,7 @@ def test_min_max_validation_regression() -> None:
         contract,
     )
 
-    checks = {
-        check.name: check
-        for check in result.checks
-    }
+    checks = {check.name: check for check in result.checks}
 
     assert checks["min:age"].passed is False
     assert checks["max:age"].passed is True
@@ -103,10 +97,7 @@ def test_allowed_values_validation_regression() -> None:
         contract,
     )
 
-    check = next(
-        c for c in result.checks
-        if c.name == "allowed:status"
-    )
+    check = next(c for c in result.checks if c.name == "allowed:status")
 
     assert check.passed is False
     assert "unknown" in check.details["invalid_values"]
@@ -136,10 +127,7 @@ def test_unique_validation_regression() -> None:
         contract,
     )
 
-    check = next(
-        c for c in result.checks
-        if c.name == "unique:id"
-    )
+    check = next(c for c in result.checks if c.name == "unique:id")
 
     assert check.passed is False
     assert check.details["duplicate_count"] == 2
@@ -169,10 +157,7 @@ def test_missing_column_regression() -> None:
         contract,
     )
 
-    check = next(
-        c for c in result.checks
-        if c.name == "column_exists:age"
-    )
+    check = next(c for c in result.checks if c.name == "column_exists:age")
 
     assert check.passed is False
 
@@ -219,10 +204,7 @@ def test_custom_rule_regression() -> None:
         contract,
     )
 
-    check = next(
-        c for c in result.checks
-        if c.name == "rule:row_count == 3"
-    )
+    check = next(c for c in result.checks if c.name == "rule:row_count == 3")
 
     assert check.passed is True
 
@@ -258,10 +240,7 @@ def test_cross_column_rule_regression() -> None:
         contract,
     )
 
-    check = next(
-        c for c in result.checks
-        if c.name == "cross_column:start_less_than_end"
-    )
+    check = next(c for c in result.checks if c.name == "cross_column:start_less_than_end")
 
     assert check.passed is False
     assert check.details["failing_rows"] == 1

@@ -57,7 +57,11 @@ class PandasEngine(Engine):
                 CheckResult(
                     name=f"column_exists:{col_name}",
                     passed=exists,
-                    message=("" if exists else f"Column '{col_name}' not found in DataFrame"),
+                    message=(
+                        ""
+                        if exists
+                        else f"Column '{col_name}' not found in DataFrame"
+                    ),
                 )
             )
 
@@ -84,12 +88,12 @@ class PandasEngine(Engine):
                 )
             )
 
-        # Cross column rules
-        for rule in contract.cross_column_rules:
+        # Cross-column rules
+        for cross_rule in contract.cross_column_rules:
             result.checks.append(
                 self._evaluate_cross_column_rule(
                     df,
-                    rule,
+                    cross_rule,
                 )
             )
 
@@ -111,7 +115,11 @@ class PandasEngine(Engine):
                 CheckResult(
                     name=f"not_null:{col_name}",
                     passed=null_count == 0,
-                    message=(f"Found {null_count} null values" if null_count else ""),
+                    message=(
+                        f"Found {null_count} null values"
+                        if null_count
+                        else ""
+                    ),
                     details={"null_count": null_count},
                 )
             )
@@ -126,9 +134,17 @@ class PandasEngine(Engine):
                     name=f"min:{col_name}",
                     passed=bool(passed),
                     message=(
-                        f"Minimum value {min_val} is below {col_def.min}" if not passed else ""
+                        f"Minimum value {min_val} is below {col_def.min}"
+                        if not passed
+                        else ""
                     ),
-                    details={"actual_min": float(min_val) if pd.notna(min_val) else None},
+                    details={
+                        "actual_min": (
+                            float(min_val)
+                            if pd.notna(min_val)
+                            else None
+                        )
+                    },
                 )
             )
 
@@ -142,9 +158,17 @@ class PandasEngine(Engine):
                     name=f"max:{col_name}",
                     passed=bool(passed),
                     message=(
-                        f"Maximum value {max_val} exceeds {col_def.max}" if not passed else ""
+                        f"Maximum value {max_val} exceeds {col_def.max}"
+                        if not passed
+                        else ""
                     ),
-                    details={"actual_max": float(max_val) if pd.notna(max_val) else None},
+                    details={
+                        "actual_max": (
+                            float(max_val)
+                            if pd.notna(max_val)
+                            else None
+                        )
+                    },
                 )
             )
 
@@ -155,7 +179,11 @@ class PandasEngine(Engine):
                 CheckResult(
                     name=f"allowed:{col_name}",
                     passed=len(invalid) == 0,
-                    message=(f"Found invalid values: {invalid}" if invalid else ""),
+                    message=(
+                        f"Found invalid values: {invalid}"
+                        if invalid
+                        else ""
+                    ),
                     details={"invalid_values": list(invalid)},
                 )
             )
@@ -168,7 +196,9 @@ class PandasEngine(Engine):
                     name=f"unique:{col_name}",
                     passed=duplicate_count == 0,
                     message=(
-                        f"Found {duplicate_count} duplicate values" if duplicate_count else ""
+                        f"Found {duplicate_count} duplicate values"
+                        if duplicate_count
+                        else ""
                     ),
                     details={"duplicate_count": duplicate_count},
                 )
@@ -257,7 +287,10 @@ class PandasEngine(Engine):
 
                 right_value = (
                     df[rule.right]
-                    if (isinstance(rule.right, str) and rule.right in df.columns)
+                    if (
+                        isinstance(rule.right, str)
+                        and rule.right in df.columns
+                    )
                     else rule.right
                 )
 
@@ -271,7 +304,11 @@ class PandasEngine(Engine):
             return CheckResult(
                 name=f"cross_column:{rule.name}",
                 passed=failing_rows == 0,
-                message=(rule.error_message if failing_rows else ""),
+                message=(
+                    rule.error_message
+                    if failing_rows
+                    else ""
+                ),
                 details={"failing_rows": failing_rows},
             )
 
@@ -279,5 +316,8 @@ class PandasEngine(Engine):
             return CheckResult(
                 name=f"cross_column:{rule.name}",
                 passed=False,
-                message=(f"Failed to evaluate cross-column rule '{rule.name}': {e}"),
+                message=(
+                    f"Failed to evaluate cross-column rule "
+                    f"'{rule.name}': {e}"
+                ),
             )

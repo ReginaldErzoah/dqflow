@@ -24,7 +24,7 @@ _OPS: dict[str, Callable[[Any, Any], Any]] = {
 
 
 class PandasEngine(Engine):
-    """Validation engine for pandas DataFrames."""
+    """Validation engine for pandas DataFrames with reduced redundant scans."""
 
     def validate(
         self,
@@ -32,45 +32,66 @@ class PandasEngine(Engine):
         contract: Contract,
         **kwargs: Any,
     ) -> ValidationResult:
-        df = data  # normalize name for internal use
+        df = data
 
         result = ValidationResult(contract_name=contract.name)
+
+        # Precompute statistics once
         cache = self._build_stats_cache(df)
 
-        # Backward compatibility (ignored but accepted)
+        # Backward compatibility
         _ = kwargs.get("parallel", False)
         _ = kwargs.get("max_workers")
 
-        # 1. COLUMN EXISTENCE CHECKS
+        existing_columns = set(df.columns)
+
+        # Column existence checks
         for col_name in contract.columns:
-            exists = col_name in df.columns
+            exists = col_name in existing_columns
 
             result.checks.append(
                 CheckResult(
                     name=f"column_exists:{col_name}",
-                    passed=exists,
-                    message=("" if exists else f"Column '{col_name}' not found in DataFrame"),
+                    passed=bool(exists),
+                    message=(
+                        ""
+                        if exists
+                        else f"Column '{col_name}' not found in DataFrame"
+                    ),
                 )
             )
 
-        # 2. COLUMN VALIDATION CHECKS
+        # Column validation
         for col_name, col_def in contract.columns.items():
-            if col_name not in df.columns:
-                continue
+            if col_name in existing_columns:
+                result.checks.extend(
+                    self._validate_column(
+                        df[col_name],
+                        col_name,
+                        col_def,
+                    )
+                )
 
-            result.checks.extend(self._validate_column(df[col_name], col_name, col_def))
-
-        # 3. RULES
+        # Rules
         for rule in contract.rules:
-            result.checks.append(self._evaluate_rule(df, rule, cache))
+            result.checks.append(
+                self._evaluate_rule(
+                    df,
+                    rule,
+                    cache,
+                )
+            )
 
-        # 4. CROSS-COLUMN RULES
-        for cc_rule in contract.cross_column_rules:
-            result.checks.append(self._evaluate_cross_column_rule(df, cc_rule))
+        # Cross-column rules
+        for rule in contract.cross_column_rules:
+            result.checks.append(
+                self._evaluate_cross_column_rule(
+                    df,
+                    rule,
+                )
+            )
 
         return result
-
-    # COLUMN VALIDATION
 
     def _validate_column(
         self,
@@ -80,21 +101,47 @@ class PandasEngine(Engine):
     ) -> list[CheckResult]:
         checks: list[CheckResult] = []
 
+        # Shared calculations
+        null_mask = series.isna()
+        null_count = int(null_mask.sum())
+        non_null = series[~null_mask]
+
+        min_val = series.min() if col_def.min is not None else None
+        max_val = series.max() if col_def.max is not None else None
+
+        unique_values = (
+            set(non_null.unique())
+            if col_def.allowed is not None
+            else None
+        )
+
+        duplicate_count = (
+            int(series.duplicated(keep=False).sum())
+            if col_def.unique
+            else 0
+        )
+
         # NOT NULL
         if col_def.not_null:
-            null_count = series.isna().sum()
+            passed = bool(null_count == 0)
+
             checks.append(
                 CheckResult(
                     name=f"not_null:{col_name}",
-                    passed=null_count == 0,
-                    message=f"Found {null_count} null values" if null_count > 0 else "",
-                    details={"null_count": int(null_count)},
+                    passed=passed,
+                    message=(
+                        f"Found {null_count} null values"
+                        if null_count
+                        else ""
+                    ),
+                    details={
+                        "null_count": null_count,
+                    },
                 )
             )
 
         # MIN
         if col_def.min is not None:
-            min_val = series.min()
             passed = pd.isna(min_val) or min_val >= col_def.min
 
             checks.append(
@@ -102,15 +149,22 @@ class PandasEngine(Engine):
                     name=f"min:{col_name}",
                     passed=bool(passed),
                     message=(
-                        f"Minimum value {min_val} is below {col_def.min}" if not passed else ""
+                        f"Minimum value {min_val} is below {col_def.min}"
+                        if not passed
+                        else ""
                     ),
-                    details={"actual_min": float(min_val) if pd.notna(min_val) else None},
+                    details={
+                        "actual_min": (
+                            float(min_val)
+                            if pd.notna(min_val)
+                            else None
+                        )
+                    },
                 )
             )
 
         # MAX
         if col_def.max is not None:
-            max_val = series.max()
             passed = pd.isna(max_val) or max_val <= col_def.max
 
             checks.append(
@@ -118,55 +172,72 @@ class PandasEngine(Engine):
                     name=f"max:{col_name}",
                     passed=bool(passed),
                     message=(
-                        f"Maximum value {max_val} exceeds {col_def.max}" if not passed else ""
+                        f"Maximum value {max_val} exceeds {col_def.max}"
+                        if not passed
+                        else ""
                     ),
-                    details={"actual_max": float(max_val) if pd.notna(max_val) else None},
+                    details={
+                        "actual_max": (
+                            float(max_val)
+                            if pd.notna(max_val)
+                            else None
+                        )
+                    },
                 )
             )
 
         # ALLOWED VALUES
         if col_def.allowed is not None:
-            invalid = set(series.dropna().unique()) - set(col_def.allowed)
+            invalid = unique_values - set(col_def.allowed)
 
             checks.append(
                 CheckResult(
                     name=f"allowed:{col_name}",
-                    passed=len(invalid) == 0,
-                    message=f"Found invalid values: {invalid}" if invalid else "",
-                    details={"invalid_values": list(invalid)},
+                    passed=bool(not invalid),
+                    message=(
+                        f"Found invalid values: {invalid}"
+                        if invalid
+                        else ""
+                    ),
+                    details={
+                        "invalid_values": list(invalid),
+                    },
                 )
             )
 
         # UNIQUE
         if col_def.unique:
-            duplicate_count = int(series.duplicated(keep=False).sum())
-
             checks.append(
                 CheckResult(
                     name=f"unique:{col_name}",
-                    passed=duplicate_count == 0,
+                    passed=bool(duplicate_count == 0),
                     message=(
-                        f"Found {duplicate_count} duplicate values" if duplicate_count > 0 else ""
+                        f"Found {duplicate_count} duplicate values"
+                        if duplicate_count
+                        else ""
                     ),
-                    details={"duplicate_count": duplicate_count},
+                    details={
+                        "duplicate_count": duplicate_count,
+                    },
                 )
             )
 
         return checks
 
-    # STATS CACHE
+    def _build_stats_cache(
+        self,
+        df: pd.DataFrame,
+    ) -> dict[str, dict[str, float | int]]:
+        row_count = len(df)
 
-    def _build_stats_cache(self, df: pd.DataFrame) -> dict[str, dict[str, float | int]]:
         return {
             col: {
-                "null_rate": df[col].isna().mean(),
-                "unique_count": df[col].nunique(dropna=False),
-                "row_count": len(df),
+                "null_rate": float(df[col].isna().mean()),
+                "unique_count": int(df[col].nunique(dropna=False)),
+                "row_count": row_count,
             }
             for col in df.columns
         }
-
-    # RULE ENGINE
 
     def _evaluate_rule(
         self,
@@ -177,11 +248,21 @@ class PandasEngine(Engine):
         try:
             context = {
                 "row_count": len(df),
-                "null_rate": lambda c: cache.get(c, {}).get("null_rate", 0),
-                "unique_count": lambda c: cache.get(c, {}).get("unique_count", 0),
+                "null_rate": lambda c: cache.get(c, {}).get(
+                    "null_rate",
+                    0,
+                ),
+                "unique_count": lambda c: cache.get(c, {}).get(
+                    "unique_count",
+                    0,
+                ),
             }
 
-            result = eval(rule, {"__builtins__": {}}, context)
+            result = eval(
+                rule,
+                {"__builtins__": {}},
+                context,
+            )
 
             return CheckResult(
                 name=f"rule:{rule}",
@@ -203,28 +284,46 @@ class PandasEngine(Engine):
     ) -> CheckResult:
         try:
             if rule.check is not None:
-                mask: Any = rule.check(df)
+                mask = rule.check(df)
+
             else:
                 assert rule.left is not None and rule.op is not None
+
                 left_series = df[rule.left]
-                right_val: Any = (
+
+                right_value = (
                     df[rule.right]
-                    if isinstance(rule.right, str) and rule.right in df.columns
+                    if isinstance(rule.right, str)
+                    and rule.right in df.columns
                     else rule.right
                 )
-                mask = _OPS[rule.op](left_series, right_val)
+
+                mask = _OPS[rule.op](
+                    left_series,
+                    right_value,
+                )
 
             failing_rows = int((~mask).sum())
-            passed = failing_rows == 0
+
             return CheckResult(
                 name=f"cross_column:{rule.name}",
-                passed=passed,
-                message=rule.error_message if not passed else "",
-                details={"failing_rows": failing_rows},
+                passed=bool(failing_rows == 0),
+                message=(
+                    rule.error_message
+                    if failing_rows
+                    else ""
+                ),
+                details={
+                    "failing_rows": failing_rows,
+                },
             )
+
         except Exception as e:
             return CheckResult(
                 name=f"cross_column:{rule.name}",
                 passed=False,
-                message=f"Failed to evaluate cross-column rule '{rule.name}': {e}",
+                message=(
+                    f"Failed to evaluate cross-column rule "
+                    f"'{rule.name}': {e}"
+                ),
             )
